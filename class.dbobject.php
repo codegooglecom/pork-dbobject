@@ -2,7 +2,7 @@
 
 /**
 	
-	Pork.dObject version 1.1
+	Pork.dObject version 1.2 beta
 	By Jelle Ursem
 	see pork-dbobject.sourceforge.net for more info
 	
@@ -12,12 +12,27 @@ define('RELATION_FOREIGN', 'RELATION_FOREIGN');
 define('RELATION_MANY', 'RELATION_MANY');
 define('RELATION_NOT_RECOGNIZED', 'RELATION_NOT_RECOGNIZED');
 define('RELATION_NOT_ANALYZED', 'RELATION_NOT_ANALYZED');
+define('RELATION_CUSTOM', 'RELATION_CUSTOM');
 
+/**
+ *	A tiny (500 lines) but powerful hot-pluggable OR-mapper/Active Record implementation for PHP5. 
+ *	It automatically recognizes different types of relations in your database by matching primary keys and takes care of most of your SQL queries.
+ *
+ *	@author Jelle Ursem
+ *	@package Libraries
+ *	@description Database Connection Class.
+ */
 class dbObject
 {
 	var $databaseInfo, $databaseValues, $changedValues, $relations, $orderProperty, $orderDirection;
 
-	/* This is  the function you use in the constructor of your objects to map fields to the database */
+	/** 
+	 *	This is  the function you use in the constructor of your objects to map fields to the database 
+	 *	@param string $table the database table to hook this class to
+	 *	@param array $fields array of fields/property mappings to use in this object
+	 *	@param int $primarykey the field to use as primary key
+	 *	@param int $id the value of the primary key that will be used to find the current row in the database
+	 */
 	public function __setupDatabase($table, $fields, $primarykey, $id=false)
 	{
 		$this->databaseInfo = new stdClass();
@@ -33,6 +48,9 @@ class dbObject
 		if($id) $this->__init();
 	}
 
+	/** 
+	 *	Fills the current object with the corresponding row from the database. 
+	 */
 	private function __init() 
 	{
 		if($this->databaseInfo->ID != false) {
@@ -41,7 +59,12 @@ class dbObject
 		}
 	}
 
-	public function __get($property) { // catch the default getter and return the appropriate property
+	/** 
+	 *	Catches the default getter and return the appropriate property
+	 *  Checks if the current value is a mapped value, and if so, if it's a changed value or not (due to caching).
+	 *	@param string $property the property being called.
+	 */
+	public function __get($property) { 
 		$field = false;
 		if(array_key_exists($property, get_object_vars($this))) return($this->$property);  // it's a private property
 		$field = $this->fieldForProperty($property);					  // are we calling the 'mapped' way?
@@ -51,38 +74,65 @@ class dbObject
 	}
 
 
+	/** 
+	 *	Catches the default setter and handles the actions needed.
+	 *  Checks if $property is a mapped property, and if so adds the new value to $this->changedValues.
+	 *	@param string $property the property being called.
+	 *  @param mixed $value the new value to be set.
+	 */
 	public function __set($property, $value) { // catch the default setter
 		if($this->hasProperty($property)) $this->changedValues[$this->fieldForProperty($property)] = $value;	
 	}	
 
+	/**
+	 * For serialization
+	 */
 	public function __sleep() 
 	{
 		$fields = array_keys(get_object_vars($this));
 		return($fields);
 	}
-	
-	private function hasProperty($property) { // does the object have the property $property ?
+
+	/**
+	 * Checks if a certain property is mapped to the database table
+	 * @param string $property the property to check
+	 * @returns boolean true if found, false if not.
+	 */
+	public function hasProperty($property) { 
 		foreach($this->databaseInfo->fields as $key=>$value) {		
 			if(strtolower($key) == strtolower($property) || strtolower($value) == strtolower($property)) return true;
 		}	
 		return false;
 	}
 
-	private function fieldForProperty($property) { // get db field by it's property name
+	/**
+	 * Finds a corresponding database fieldname for a property
+	 * @param string $property the property to check
+	 * @returns the corresponding property or false if none found
+	 */
+	public function fieldForProperty($property) { // get db field by it's property name
 		foreach($this->databaseInfo->fields as $key=>$value) {		
 			if(strtolower($key) == strtolower($property) || strtolower($value) == strtolower($property)) return $key;
 		}	
 		return false;
 	}
 	
-
+	/**
+	 * Tells the database to delete the current mapped row
+	 */
 	public function DeleteYourself() { //deletes the current object from database.
 		if($this->databaseInfo->ID !== false) {
 			dbConnection::getInstance()->query("delete from {$this->databaseInfo->table} where {$this->databaseInfo->primary} = {$this->databaseInfo->ID}");
 		}
 	}
 
-	public function setOrderProperty($field, $order='ASC') { // set the default property to use with order by queries
+  /**
+	 * Set the default property to use with order by queries.
+	 * Order by will automatically be appended if you're selecting a batch of objects.
+	 * @param string $field Fieldname to use order by on
+	 * @param string $order ASC / DESC
+	 */
+	public function setOrderProperty($field, $order='ASC') { 
 		$this->orderProperty = $field;
 		$this->orderDirection = $order;
 	}
@@ -112,11 +162,17 @@ class dbObject
 		return($this->databaseInfo->ID); // and return it 
 	}
 
+	/**
+	 * Updates the current row if $changedValues array is not empty.
+	 * If $this->ID == false it will insert a new record.
+	 * @returns int the newly inserted primary key or current id.
+	 */
 	public function Save() 
 	{
 		if(sizeof($this->changedValues) > 0 && $this->databaseInfo->ID == false) { // it's a new record for the db
 			$id = $this->InsertNew();
 			$this->analyzeRelations(); // re-analyze the relation types so we can use Find()
+			if(array_search('onInsert', get_class_methods(get_class($this))) !== false) { $this->onInsert(); } // fire the onInsert event.			
 			return $id;
 		}
 		elseif ($this->changedValues != false) { // otherwise just build the update query
@@ -135,8 +191,11 @@ class dbObject
 	}
 		
 	/**
-		Add a new relation to the relation list and set it to be analyzed if used
-	*/
+	 * Add a new relation to the relation list and set it to be analyzed if used.
+	 * Newly added relations will standard have RELATION_NOT_ANALYZED for relationtype to optimize speed
+	 * @param string $classname Connecting classname
+	 * @param string $connectorclassname Classname to use as connector class
+ 	 */
 	public function addRelation($classname, $connectorclassname=false) 
 	{
 		$this->relations[$classname] = new stdClass();
@@ -146,8 +205,29 @@ class dbObject
 	}
 
 
+	/**
+	 * New function to add the custom relation mappings. Now you no longer need matching primary keys to have a connection.
+	 * E.G Map Customers.ID to Contracts.Customer_ID 
+	 *
+	 * Usage: $this->addCustomRelation($targetclass, $sourceclassproperty, $targetclassProperty)
+	 * Do not forget to do this in both classes. For a relation between a Customers and a Contracts object as shown above, you need to do the following:
+	 * //class customer -> __construct()
+	 * $this->addCustomRelation('Contract', 'ID', 'Customer_ID');
+	 * // class contract -> __construct()
+	 * $this->addCustomRelation('Customer', 'Customer_ID', 'ID');
+	 * All Find() connect and disconnect functions work transparently with this new method. 
+	 */
+	function addCustomRelation($classname, $sourceproperty, $targetproperty)
+	{
+		$this->relations[$classname] = new stdClass();
+		$this->relations[$classname]->relationType = RELATION_CUSTOM;
+		$this->relations[$classname]->sourceProperty = $sourceproperty;
+		$this->relations[$classname]->targetProperty = $targetproperty;
+	}
+
+
 	/** 
-		This is where the true magic happens. It will analyze what kind of Db relation we're using.
+	 * This is where the true magic happens. It will analyze what kind of DB relation we're using. (1:1, 1:many, many:many)
 	*/
 	private function analyzeRelations() 
 	{
@@ -188,6 +268,9 @@ class dbObject
 	
 	/*
 		This connects 2 dbObjects together, with a connector class if needed.
+	 * Runs relation analyzer if needed.
+	 * @uses analyzeRelations
+	 * @param object $object the class to connect.
 	*/
 	public function Connect($object) 
 	{
@@ -222,13 +305,28 @@ class dbObject
 					$connector->$property = $object->databaseInfo->ID;
 					$connector->Save();
 				break;
+				case RELATION_CUSTOM:  // determine wich one needs to have the primary key set for the 1:many or many:one relation 
+					if($this->fieldForProperty($this->relations[$className]->sourceProperty) != $this->databaseInfo->primary) { // we don't want to change primary keys. This is a good way to check which value to change
+						$targetval = $this->relations[$className]->targetProperty;
+						$this->changedValues[$this->fieldForProperty($this->relations[$className]->sourceProperty)] = $object->$targetval;
+					}
+					else {
+						$targetval = $this->relations[$className]->sourceProperty;
+						$object->changedValues[$this->relations[$className]->targetProperty] = $this->ID;	
+					}
+				break;
 			}
 			$this->Save(); // save both objects to store changed values.
 			$object->Save();
 		}	
 	}
 
-	// see Connect() for how this works, it's the other way around.
+	/**
+	 * Disconnects the relation between 2 objects.
+	 * Runs relation analyzer if needed.
+	 * @uses analyzeRelations
+	 * @param object $object the class to disconnect.
+	 */
 	public function Disconnect($object, $id=false) 
 	{
 		if(!$object && !$id) return;
@@ -243,30 +341,40 @@ class dbObject
 				case RELATION_SINGLE:
 					$this->changedValues[$object->databaseInfo->primary] = '';
 					$object->changedValues[$this->databaseInfo->primary] = '';
-					$this->Save();
-					$object->Save();
 				break;
 				case RELATION_FOREIGN:
 					if(array_key_exists($this->databaseInfo->primary, $object->databaseInfo->fields)) {
 						$object->changedValues[$this->databaseInfo->primary] = '';
-						$object->Save();
 					}
 					elseif(array_key_exists($object->databaseInfo->primary, $this->databaseInfo->fields)) {
 						$this->changedValues[$object->databaseInfo->primary] = '';
-						$this->Save();
 					}
 				break;
 				case RELATION_MANY:
 					$input = dbObject::search($this->relations[$className]->connectorClass, array($object->databaseInfo->primary => $object->databaseInfo->ID, $this->databaseInfo->primary => $this->databaseInfo->ID)); // search for a connector with both primaries
 					if($input) $input[0]->deleteYourSelf();
 				break;
+				case RELATION_CUSTOM:  // determine wich one needs to have the primary key set for the 1:many or many:one relation 
+					if($this->fieldForProperty($this->relations[$className]->sourceProperty) != $this->databaseInfo->primary) { // we don't want to change primary keys. This is a good way to check which value to change
+						$targetval = $this->relations[$className]->targetProperty;
+						$this->changedValues[$this->fieldForProperty($this->relations[$className]->sourceProperty)] = '';
+					}
+					else {
+						$targetval = $this->relations[$className]->sourceProperty;
+						$object->changedValues[$this->relations[$className]->targetProperty] = '';	
+					}
+				break;
 			}
+			$this->Save();
+			$object->Save();
 		}	
 	}
 
 	/**
-		Checks if this is a 'connecting' object between 2 tables by checking if the passed classname is a connection class.
-	*/
+	 * Checks if this is a 'connecting' object between 2 tables by checking if the passed classname is a connection class.
+	 * @param string $className Classname to check
+	 * @returns boolean
+	 */
 	private function isConnector($className)
 	{
 		foreach ($this->relations as $key => $val) { // walk all relations
@@ -275,7 +383,11 @@ class dbObject
 		return false;	
 	}
 
-	public function Import($values) { // import a pre-filled object (like a table row)
+	/**
+	 * Imports a pre-filled object (like a table row) into this object
+	 * @param array $values Database values to fill this object with
+	 */
+	public function Import($values) { 
 		$this->databaseValues = $values;
 		$this->databaseInfo->ID = (!empty($values[$this->databaseInfo->primary])) ? $values[$this->databaseInfo->primary] : false;
 	}
@@ -284,7 +396,9 @@ class dbObject
 	/**
 		Imports an array of e.g. db rows and returns filled instances of $className
 		This will not run the analyzerelations or other stuff for performance and recursivity reasons.
-	*/
+	 *  @param string $className ClassName to cast to
+	 *  @param array $input recursive array of records to import.
+	 */
 	public static function importArray($className, $input) 
 	{
 		$output = array();
@@ -297,7 +411,11 @@ class dbObject
 		return(sizeof($output) > 0 ? $output : false);	
 	}
 
-	/* Is the passed class a relation of $this? */
+	/**
+	  * Is the passed class a relation of $this? 
+	  * @param $class classname to test
+	  * @returns boolean isRelation
+	  */
 	private function isRelation($class) 
 	{
 		if (strtolower($class) == strtolower(get_class($this))) { return(get_class($this)); }
@@ -309,14 +427,21 @@ class dbObject
 
 	/* 
 	The awesome find function. Creates a QueryBuilder Object wich creates a Query to find all objects for your filters.
-	Syntax for the filters array:
-	Array(
-			'ID > 500', // just a key element, it will detect this, map the fields and just execute it.
-			'property'=> 'value' // $property of $classname has to be $value 
-			Array('ClassName'=> array('property'=>'value')// Filter by a (relational) class's property. You can use this recursively!!
-	) 
-	Will return false if it finds nothing.
-	*/
+	 * <code>
+	 * //  Syntax for the filters array: 
+	 * Array(
+ 	 *		'ID > 500', // just a key element, it will detect this, map the fields and just execute it.
+	 *		'property'=> 'value' // $property of $classname has to be $value 
+	 *		Array('ClassName'=> array('property'=>'value')// Filter by a (relational) class's property. You can use this recursively!!
+	 * ) 
+	 * </code>
+ 	 * @param string $className Classname to find (has to be a relation of $this or get_class($this))
+	 * @param array $filters array of filters to use in query
+	 * @param array $extra array of eventual order by / group by parameters
+	 * @param array $justThese Fetch only these fields from the table. Useful if you don't want to fetch large text or blob columns.
+	 * @uses QueryBuilder to build the actual query
+	 * @returns array a batch of pre-filled objects of $className or false if it finds nothing
+	 */
 	public function Find($className, $filters=array(), $extra=array(), $justThese=array()) 
 	{
 		$originalClassName = ($className instanceof dbObject) ? get_class($className) : $className;
@@ -330,9 +455,17 @@ class dbObject
 		return(dbObject::importArray($originalClassName, $input));
 	}
 	
-	/* Static Find function
-		Use this if you want to just run dbObject::Search(classname, filters) without creating an empty class in your code. It will automatically create the classname and execute the search.
-	*/
+	
+	/**
+	 * Static wrapper around the Find function function. 
+	 * @see Find for how this works.
+ 	 * @param string $className Classname to find (has to be a relation of $this or get_class($this))
+	 * @param array $filters array of filters to use in query
+	 * @param array $extra array of eventual order by / group by parameters
+	 * @param array $justThese Fetch only these fields from the table. Useful if you don't want to fetch large text or blob columns.
+	 * @uses Find to build the actual query
+	 * @returns array a batch of pre-filled objects of $className or false if it finds nothing
+	 */
 	static function Search($className, $filters=array(), $extra=array(), $justThese=array())
 	{
 		$class = new $className();
@@ -342,13 +475,20 @@ class dbObject
 		}
 	}
 
+	/**
+	 * Destructor auto-calls $this->Save().
+	 * @uses Save
+	 */
 	public function __destruct()
 	{
 		$this->Save(); // try to save the object if changed.
 	}
 }
 
-/* The helper class that analyzes what joins to use in the select queries */
+/**
+ * The helper class that analyzes what joins to use in the select queries 
+ * @package Libraries
+ */
 class QueryBuilder 
 {
 	var $class, $fields, $filters, $extras, $justthese, $joins, $groups, $wheres, $limit, $orders;
@@ -468,6 +608,10 @@ class QueryBuilder
 				$this->joins[] = "LEFT JOIN \n\t {$conn->databaseInfo->table} on  {$conn->databaseInfo->table}.{$parent->databaseInfo->primary} = {$parent->databaseInfo->table}.{$parent->databaseInfo->primary}";
 				$this->joins[] = "LEFT JOIN \n\t {$class->databaseInfo->table} on {$conn->databaseInfo->table}.{$class->databaseInfo->primary} = {$class->databaseInfo->table}.{$class->databaseInfo->primary}";
 			break;
+			case RELATION_CUSTOM:
+				$this->joins[] = "LEFT JOIN \n\t {$class->databaseInfo->table} on {$parent->databaseInfo->table}.{$parent->relations[$className]->sourceProperty} = {$class->databaseInfo->table}.{$parent->relations[$className]->targetProperty}";
+				
+			break;
 			default:
 				$errmsg = "<p style='color:red'>Error: class ".get_class($parent)." probably has no relation defined for class {$className}  or you did something terribly wrong...</p>";
 				throw_error($errmsg);
@@ -482,7 +626,7 @@ class QueryBuilder
 		$where = (sizeof($this->wheres) > 0) ? ' WHERE '.implode(" \n AND \n\t", $this->wheres) : '';
 		$order = (sizeof($this->orders) > 0) ? ' ORDER BY '.implode(", ", $this->orders) : '' ;
 		$group = (sizeof($this->groups) > 0) ? ' GROUP BY '.implode(", ", $this->groups) : '' ;
-		$query = 'SELECT '.implode(", \n\t", $this->fields)."\n FROM \n\t".$this->class->databaseInfo->table."\n ".implode("\n ", $this->joins).$where.' '.$order.' '.$group.' '.$this->limit;
+		$query = 'SELECT '.implode(", \n\t", $this->fields)."\n FROM \n\t".$this->class->databaseInfo->table."\n ".implode("\n ", $this->joins).$where.' '.$group.' '.$order.' '.$this->limit;
 		return($query);
 	}
 }
